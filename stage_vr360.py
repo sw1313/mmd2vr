@@ -25,7 +25,9 @@ import stage_model
 from vr360_guides import BackgroundExtension, choose
 from vr360_rim import SmoothRim
 from vr360_options import DEFAULT_PROMPT, LTX25_ASSETS, LTX25_AUDIO_VAE, LTX_FRONT_WIDTH, ltx25_available, ltx25_path
-from vr360_options import syfe_union_path
+from vr360_options import (
+    CUSTOM_ASSET_DIRS, custom_model_files, gguf_loader_path, model_file_versions, syfe_union_path,
+)
 from vr360_finish import ExteriorFinish
 from vr360_union import People, add_guide, load_depth, write_depth
 
@@ -230,6 +232,27 @@ def configure_ltx25(graph, prompt):
     graph["7"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0], "text": prompt}}
 
 
+def configure_custom_ltx(graph, manifest, prompt):
+    assets = manifest["assets"]
+    checkpoint = assets["checkpoint"]
+    if checkpoint.lower().endswith(".gguf"):
+        graph["1"] = {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": checkpoint}}
+    else:
+        graph["1"]["inputs"]["unet_name"] = checkpoint
+    graph["2"]["inputs"]["lora_name"] = assets["outpaint_lora"]
+    graph["3"]["inputs"]["vae_name"] = assets["video_vae"]
+    if "audio_vae" in assets:
+        graph["4"]["inputs"]["vae_name"] = assets["audio_vae"]
+    if manifest["family"] == "ltx25":
+        loader = "CLIPLoader"
+        names = {"clip_name": assets["text_encoder"]}
+    else:
+        loader = "DualCLIPLoader"
+        names = {"clip_name1": assets["text_encoder"], "clip_name2": assets["text_projection"]}
+    graph["clip"] = {"class_type": loader, "inputs": {**names, "type": "ltxv", "device": "default"}}
+    graph["7"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0], "text": prompt}}
+
+
 def infer(instance, tmp, guide, uid, frames, fps, seed, checkpoint, options=None):
     url, proc = instance
     graph = json.loads((engine.ROOT / "vr360_graph.json").read_text())
@@ -253,7 +276,9 @@ def infer(instance, tmp, guide, uid, frames, fps, seed, checkpoint, options=None
             graph["23"]["inputs"]["tile_size"] = options["vae_tile"]
         else:
             graph["23"] = {"class_type":"VAEDecode","inputs":{"samples":["22",2],"vae":["3",0]}}
-        if options.get("outpaint_model") == "ltx25":
+        if manifest := options.get("custom_model"):
+            configure_custom_ltx(graph, manifest, options["prompt"])
+        elif options.get("outpaint_model") == "ltx25":
             configure_ltx25(graph, options["prompt"])
         elif options["prompt"] != DEFAULT_PROMPT or not (Path(model_dirs()["embeddings"]) / "vr.safetensors").is_file():
             graph["clip"] = {"class_type":"DualCLIPLoader","inputs":{
@@ -497,6 +522,12 @@ def render(work, key, eye, angle, rate):
     ltx25 = opts.get("outpaint_model") == "ltx25"
     directories = model_dirs()
     gguf_nodes = None
+    manifest = opts.get("custom_model")
+    custom_paths = {}
+    if manifest:
+        custom_paths = custom_model_files(manifest["id"], manifest["assets"])
+        if model_file_versions(custom_paths) != manifest["versions"]:
+            raise ValueError("自定义模型权重已在入队后变更，请重新提交任务")
     if h3:
         import vr360_h3
         opts = dict(opts, window_frames=opts["h3_window"], window_overlap=opts["h3_overlap"])
@@ -511,7 +542,7 @@ def render(work, key, eye, angle, rate):
                 raise RuntimeError("本服务缺少 SyFe Union 权重")
             directories["loras"] += "\n" + str(syfe_weights.parent)
             print("SyFe Union · 1.0× 参考分辨率", flush=True)
-        if ltx25:
+        if ltx25 and not manifest:
             if not ltx25_available():
                 raise RuntimeError("LTX-2.5 Q4_K_M 权重或 GGUF 加载器未安装")
             home = ltx25_path()
@@ -519,10 +550,23 @@ def render(work, key, eye, angle, rate):
                 directories[key] = str(home / "models" / key)
             gguf_nodes = home / "gguf_nodes"
             print("LTX-2.5 Distilled Q4_K_M", flush=True)
+        if manifest:
+            opts = dict(opts, outpaint_checkpoint=manifest["assets"]["outpaint_lora"])
         checkpoint = opts.setdefault("outpaint_checkpoint", "360vroutpaint_v2_step07000.safetensors")
         print(f"VR360 A 扩画权重 {checkpoint}", flush=True)
         if opts.get("front_only"):
             print(f"LTX 前半球推理 {LTX_FRONT_WIDTH}×640（左右各留 18°）", flush=True)
+    if manifest:
+        custom_dirs = {CUSTOM_ASSET_DIRS[role]: str(path.parent) for role, path in custom_paths.items()}
+        if opts.get("union_enabled"):
+            custom_dirs["loras"] += "\n" + directories["loras"]
+        directories.update(custom_dirs)
+        if custom_paths["checkpoint"].suffix.lower() == ".gguf":
+            loader = gguf_loader_path()
+            if not loader.is_file():
+                raise FileNotFoundError("自定义 LTX 模型缺少 GGUF 加载器")
+            gguf_nodes = loader.parent
+        print(f"自定义扩画模型 {manifest['label']}", flush=True)
     cv.setNumThreads(2)
     profile = h3 and os.environ.get("MMD_H3_PROFILE") == "1"
     began = time.perf_counter()

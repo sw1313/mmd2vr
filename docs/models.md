@@ -59,3 +59,51 @@ python tools/extract_h3_union_table.py models/h3/fl-union-table.npy
 ```
 
 H3 使用同一个人物检测器路径 `vr360-a/detectors/person.onnx`。快速档可以只配置普通 NVFP4、VAE 和编码器。
+
+## 导入自己的外围扩画模型
+
+在模型根目录下新建 `outpaint/<模型 ID>/`，然后放入 `model.json` 和配套权重。Docker 中对应 `/models/outpaint/`。Windows 使用 `NUNIF_HOME` 指定的模型目录，默认是项目下的 `.runtime/models`。模型 ID 使用小写英文字母、数字、下划线或连字符，首字符为字母或数字。
+
+按下面的目录放文件。配置里填写文件名，文件名可自行更换。
+
+| 目录 | 配置键 | 用途 |
+| --- | --- | --- |
+| `diffusion_models/` | `checkpoint` | 基础模型。LTX 支持适配的 safetensors 或 GGUF，H3 使用兼容 FL2VA 工作流的 safetensors。 |
+| `vae/` | `video_vae` | 与底模匹配的视频 VAE。 |
+| `vae/` | `audio_vae` | LTX 声画联合推理开启时填写。 |
+| `text_encoders/` | `text_encoder` | 与底模匹配的文本编码器。LTX‑2.5 使用含投影的一体权重。 |
+| `text_encoders/` | `text_projection` | LTX‑2.3 需要单独填写文本投影权重。 |
+| `loras/` | `outpaint_lora` | LTX 需要与模型和 VR360 扩画工作流兼容的 IC-LoRA。 |
+
+例如 `outpaint/my-ltx25/model.json` 可以写成：
+
+```json
+{
+  "label": "我的 LTX-2.5 扩画",
+  "family": "ltx25",
+  "assets": {
+    "checkpoint": "my-ltx25.gguf",
+    "video_vae": "my-video-vae.safetensors",
+    "text_encoder": "my-text-encoder.safetensors",
+    "outpaint_lora": "my-outpaint-lora.safetensors"
+  },
+  "features": ["source_mask", "front_only"],
+  "settings": {
+    "steps": 8,
+    "cfg": 1.0
+  }
+}
+```
+
+`family` 选择 `ltx2`（LTX‑2.3）、`ltx25`（LTX‑2.5）或 `h3`（H3 FL2VA）。目录导入会复用选定的工作流，其他架构需要另写适配。LTX 使用 GGUF 时仍需按上文安装加载器。
+
+`features` 声明权重兼容的功能。省略或留空时，表内功能均关闭，WebUI 隐藏相应控件。启用的功能仍可通过页面或 `settings` 调整。Union 使用当前工作流对应的控制权重，人物检测和深度图沿用已配置的公共依赖。
+
+| 功能 | 可用于 |
+| --- | --- |
+| `union`、`source_mask`、`background_extension`、`palette` | LTX 与 H3 |
+| `vae_tiling`、`front_only`、`joint_audio` | LTX |
+
+`settings` 固定指定的参数，例如 LTX 的 `steps`、`sampler`，或 H3 的 `h3_size`、`h3_steps`。固定参数通过配置文件修改，其他兼容参数继续用 WebUI。快速档和质量档按钮用于内置模型。
+
+重启 WebUI 后，在「外围生成模型」下拉框选择带「自定义」标记的模型。缺少文件或配置无效时，该条目会被跳过，原因写入 WebUI 日志。入队任务使用提交时的配置。更换同名权重后重新提交；批处理中已用相同模型配置和权重版本完成的成片会跳过。

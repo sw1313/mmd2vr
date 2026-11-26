@@ -276,6 +276,72 @@ class DirectorySubmissionTests(unittest.TestCase):
                          "MiniMax-H3_FL2VA-NVFP4-HQ.safetensors")
         self.assertNotEqual(key, hq)
 
+    def test_custom_model_choice_and_job_use_manifest_capabilities(self):
+        from vr360_options import CUSTOM_ASSET_DIRS
+        import stage_vr360
+        import vr360_h3
+
+        root = e.STATE / "models"
+        self.enterContext(patch.dict("os.environ", {"NUNIF_HOME": str(root)}))
+        for family in ("ltx2", "ltx25", "h3"):
+            manifest_path = root / "outpaint" / family / "model.json"
+            roles = ["checkpoint", "video_vae", "text_encoder"]
+            if family != "h3":
+                roles.append("outpaint_lora")
+            if family == "ltx2":
+                roles.append("text_projection")
+            assets = {role: f"test-{family}-{role}.safetensors" for role in roles}
+            for role, name in assets.items():
+                file = manifest_path.parent / CUSTOM_ASSET_DIRS[role] / name
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_bytes(b"fixture")
+            steps = "h3_steps" if family == "h3" else "steps"
+            manifest = {"label": f"Example {family}", "family": family, "assets": assets,
+                        "features": [], "settings": {steps: 12}}
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            selection = f"custom:{family}"
+            self.assertIn((f"Example {family} · 自定义", selection), app.available_model_choices())
+            _, key = self.submit(
+                self.src / "集合/a.mp4", outpaint_model=selection, union_enabled=True, union_variant="syfe",
+                h3_union=True, source_mask_enabled=True, source_attention=.5, guide_extension_enabled=True,
+                palette_enabled=True, vae_tiled=True, detector_cuda=True, joint_audio=True,
+            )
+            spec = json.loads(app.get_job(key)["spec"])
+            opts = spec["vr360"]
+            self.assertIn(f"Example {family}", app.mode_label(spec))
+            self.assertEqual(opts[steps], 12)
+            self.assertEqual(opts["custom_model"]["assets"], assets)
+            for field in ("source_mask_enabled", "guide_extension_enabled", "palette_enabled", "detector_cuda"):
+                self.assertFalse(opts[field])
+            if family == "h3":
+                graph = vr360_h3.graph(opts, "window")
+                self.assertNotIn("15", graph)
+                self.assertNotIn("union", graph["13"]["inputs"])
+                self.assertEqual(graph["8"]["inputs"]["unet_name"], assets["checkpoint"])
+                self.assertEqual(graph["6"]["inputs"]["vae_name"], assets["video_vae"])
+                self.assertEqual(graph["7"]["inputs"]["clip_name"], assets["text_encoder"])
+            else:
+                graph = json.loads((e.ROOT / "vr360_graph.json").read_bytes())
+                stage_vr360.configure_custom_ltx(graph, opts["custom_model"], opts["prompt"])
+                stage_vr360.apply_inference_controls(graph, "window", opts)
+                for field in ("union_enabled", "joint_audio", "vae_tiled", "front_only"):
+                    self.assertFalse(opts[field])
+                self.assertEqual(graph["1"]["inputs"]["unet_name"], assets["checkpoint"])
+                self.assertEqual(graph["2"]["inputs"]["lora_name"], assets["outpaint_lora"])
+                self.assertNotIn("4", graph)
+                self.assertNotIn("source_weights", graph)
+                self.assertEqual(graph["12"]["inputs"]["width"], 1280)
+
+            manifest["settings"][steps] = 16
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            _, changed = self.submit(self.src / "集合/a.mp4", outpaint_model=selection)
+            self.assertNotEqual(key, changed)
+            self.assertEqual(json.loads(app.get_job(key)["spec"])["vr360"][steps], 12)
+            manifest["assets"]["checkpoint"] = "../hidden.safetensors"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(gr.Error, "模型文件名"):
+                self.submit(self.src / "集合/a.mp4", outpaint_model=selection)
+
     def test_empty_or_invalid_batch_does_not_queue_partial_work(self):
         (self.src / "空").mkdir()
         with self.assertRaisesRegex(gr.Error, "没有支持的视频"):

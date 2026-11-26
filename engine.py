@@ -342,6 +342,7 @@ def completed_output(spec, index=None, require_known_source=False):
     except (OSError, ValueError, KeyError, subprocess.SubprocessError):
         return None
     source_has_audio = any(stream["codec_type"] == "audio" for stream in source_meta["streams"])
+    custom = spec.get("vr360", {}).get("custom_model")
     for file, prefix in matches:
         with db() as connection:
             records = connection.execute("SELECT spec FROM jobs WHERE id LIKE ?", (prefix + "%",)).fetchall()
@@ -351,6 +352,8 @@ def completed_output(spec, index=None, require_known_source=False):
             and (old.get("size"), old.get("mtime")) == (spec.get("size"), spec.get("mtime"))
             for old in related
         ):
+            continue
+        if custom and not any(old == spec for old in related):
             continue
         if require_known_source and not related:
             continue

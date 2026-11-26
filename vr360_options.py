@@ -1,8 +1,11 @@
 """Controls shared by the VR360 submission API and the WebUI."""
 
+import json
+import logging
 import math
 import os
 from pathlib import Path
+import re
 
 DEFAULT_PROMPT = "360 degree equirectangular panorama, high quality, detailed video"
 DEFAULT_VIEW_ZOOM = 1.0
@@ -145,7 +148,22 @@ def syfe_union_path():
 
 
 def available_model_choices():
-    return MODEL_CHOICES if ltx25_available() else [item for item in MODEL_CHOICES if item[1] != "ltx25"]
+    builtins = list(MODEL_CHOICES) if ltx25_available() else [item for item in MODEL_CHOICES if item[1] != "ltx25"]
+    root = custom_models_root()
+    if not root.is_dir():
+        return builtins
+    for folder in sorted(root.iterdir()):
+        if not (folder / "model.json").is_file():
+            continue
+        selection = CUSTOM_PREFIX + folder.name
+        try:
+            manifest = custom_model(selection)
+            style_options({"outpaint_model": selection}, manifest)
+        except (OSError, ValueError) as exc:
+            logging.getLogger(__name__).warning("跳过自定义扩画模型 %s：%s", folder.name, exc)
+            continue
+        builtins.append((f"{manifest['label']} · 自定义", selection))
+    return builtins
 
 
 LTX_ONLY = {
@@ -156,6 +174,139 @@ LTX_ONLY = {
     "depth_feather", "joint_audio",
     "front_only",
 }
+
+CUSTOM_PREFIX = "custom:"
+CUSTOM_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,47}")
+CUSTOM_ASSET_DIRS = {
+    "checkpoint": "diffusion_models", "video_vae": "vae", "audio_vae": "vae",
+    "text_encoder": "text_encoders", "text_projection": "text_encoders", "outpaint_lora": "loras",
+}
+# Absent capabilities disable both the operation and its related controls.
+CUSTOM_FEATURES = {
+    "union": {
+        "union_enabled": False, "union_variant": "official", "union_weight": 0.0,
+        "depth_enabled": False, "depth_strength": 0.0, "depth_attention": 0.0,
+        "depth_size": 392, "depth_smoothing": 0, "protect_actors": False,
+        "depth_margin": 0, "depth_feather": 1,
+        "h3_union": False, "h3_strength": 1.0,
+    },
+    "source_mask": {
+        "source_mask_enabled": False, "source_mask_inside": 1.0, "source_mask_outside": 0.0,
+        "source_attention": 1.0,
+    },
+    "vae_tiling": {"vae_tiled": False, "vae_tile": 512},
+    "joint_audio": {"joint_audio": False},
+    "front_only": {"front_only": False},
+    "background_extension": {
+        "guide_extension_enabled": False, "guide_extension_width": 40,
+        "guide_extension_margin": 15, "guide_extension_contrast": 45, "guide_extension_blur": 3.0,
+    },
+    "palette": {"palette_enabled": False, "palette_strength": 0.0},
+}
+CUSTOM_FAMILY_FEATURES = {
+    "ltx2": set(CUSTOM_FEATURES), "ltx25": set(CUSTOM_FEATURES),
+    "h3": {"union", "source_mask", "background_extension", "palette"},
+}
+
+
+def custom_models_root():
+    return (Path(os.getenv("NUNIF_HOME", Path(__file__).resolve().parent / ".runtime/models"))
+            / "outpaint").resolve()
+
+
+def custom_model_folder(selection):
+    model_id = selection.removeprefix(CUSTOM_PREFIX)
+    if not selection.startswith(CUSTOM_PREFIX) or not CUSTOM_ID.fullmatch(model_id):
+        raise ValueError("无效的自定义扩画模型 ID")
+    root = custom_models_root()
+    folder = (root / model_id).resolve()
+    if folder.parent != root or folder.name != model_id:
+        raise ValueError("自定义扩画模型目录须位于模型根目录内")
+    return folder
+
+
+def custom_model_files(selection, assets):
+    folder = custom_model_folder(selection)
+    paths = {}
+    for role, name in assets.items():
+        suffixes = (".safetensors", ".gguf") if role == "checkpoint" else (".safetensors",)
+        if (role not in CUSTOM_ASSET_DIRS or not isinstance(name, str) or name != name.strip()
+                or not name.isprintable() or any(c in name for c in "/\\:\r\n") or Path(name).suffix.lower() not in suffixes):
+            raise ValueError(f"自定义扩画模型的 {role} 须为模型文件名")
+        path = folder / CUSTOM_ASSET_DIRS[role] / name
+        if not path.resolve().is_relative_to(folder) or not path.is_file():
+            raise ValueError(f"自定义扩画模型 {folder.name} 缺少有效的 {role} 文件")
+        paths[role] = path
+    return paths
+
+
+def unsupported_custom_settings(manifest):
+    features = set(manifest["features"])
+    settings = {
+        key: neutral
+        for feature, controls in CUSTOM_FEATURES.items()
+        if feature not in features
+        for key, neutral in controls.items()
+    }
+    if not features.intersection({"union", "background_extension", "palette"}):
+        settings.update(detector_cuda=False, person_threshold=CONTROLS["person_threshold"][1])
+    return settings
+
+
+def model_file_versions(paths):
+    revisions = {}
+    for role, path in paths.items():
+        info = path.stat()
+        revisions[role] = [info.st_size, info.st_mtime_ns]
+    return revisions
+
+
+def custom_model(selection):
+    folder = custom_model_folder(selection)
+    path = folder / "model.json"
+    if not path.is_file() or path.resolve().parent != folder or path.stat().st_size > 65536:
+        raise ValueError(f"缺少可读取的自定义模型配置 {folder.name}/model.json")
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"自定义扩画模型 {folder.name} 的 model.json 格式无效") from exc
+    if not isinstance(manifest, dict) or manifest.keys() - {"label", "family", "assets", "features", "settings"}:
+        raise ValueError("自定义扩画模型配置包含未知字段")
+    label, family = manifest.get("label"), manifest.get("family")
+    if not isinstance(label, str) or not 1 <= len(label.strip()) <= 80 or not label.isprintable():
+        raise ValueError("自定义扩画模型的 label 须为 1–80 个字符")
+    if not isinstance(family, str) or family not in CUSTOM_FAMILY_FEATURES:
+        raise ValueError("自定义模型须使用 ltx2、ltx25 或 h3 工作流")
+    features = manifest.get("features", [])
+    if (not isinstance(features, list) or any(not isinstance(item, str) for item in features)
+            or set(features) - CUSTOM_FAMILY_FEATURES[family]):
+        raise ValueError("自定义模型声明了这个工作流不支持的功能")
+    assets = manifest.get("assets")
+    required = {"checkpoint", "video_vae", "text_encoder"}
+    if family != "h3":
+        required.add("outpaint_lora")
+    if family == "ltx2":
+        required.add("text_projection")
+    if "joint_audio" in features:
+        required.add("audio_vae")
+    if not isinstance(assets, dict) or assets.keys() != required:
+        raise ValueError(f"自定义模型的 assets 须填写 {', '.join(sorted(required))}")
+    paths = custom_model_files(selection, assets)
+    if paths["checkpoint"].suffix.lower() == ".gguf" and (family == "h3" or not gguf_loader_path().is_file()):
+        raise ValueError("H3 自定义工作流使用 safetensors，LTX 的 GGUF 需要安装 GGUF 加载器")
+    settings = manifest.get("settings", {})
+    allowed = set(CONTROLS) - {"outpaint_checkpoint"}
+    if family == "h3":
+        allowed = (allowed - LTX_ONLY) | H3_FIELDS.keys()
+    result = dict(label=label.strip(), family=family, assets=assets, features=sorted(set(features)))
+    if not isinstance(settings, dict) or settings.keys() - (allowed - unsupported_custom_settings(result).keys()):
+        raise ValueError("自定义模型的 settings 包含未知、禁用或由权重文件指定的参数")
+    return {**result, "settings": settings, "versions": model_file_versions(paths)}
+
+
+def gguf_loader_path():
+    return ltx25_path() / "gguf_nodes" / "__init__.py"
+
 
 # The submit endpoint takes these six fields before the extended controls.
 BASE_FIELDS = ("match_stage", "seam_luma", "generation_fps", "seed", "observed_edges", "anime_detail")
@@ -316,12 +467,23 @@ LTX_DEFAULTS = {
 }
 
 
-def style_options(values):
+def style_options(values, manifest=None):
     values = dict(values)
-    backend = values.pop("outpaint_model", "ltx2")
+    selection = values.pop("outpaint_model", "ltx2")
+    if not isinstance(selection, str):
+        raise ValueError("无效的扩画模型")
+    if selection.startswith(CUSTOM_PREFIX):
+        manifest = custom_model(selection) if manifest is None else manifest
+        backend = manifest["family"]
+        values.update(manifest["settings"])
+        values.update(unsupported_custom_settings(manifest))
+        values.pop("outpaint_checkpoint", None)
+        values.pop("h3_checkpoint", None)
+    else:
+        backend = selection
     if backend not in (*H3_CHECKPOINTS, "ltx2", "ltx25"):
         raise ValueError("无效的扩画模型")
-    if backend == "ltx25" and not ltx25_available():
+    if backend == "ltx25" and manifest is None and not ltx25_available():
         raise ValueError("本服务缺少 LTX-2.5 Q4_K_M、配套权重或 GGUF 加载器")
     controls = dict(CONTROLS)
     checkpoint = values.pop("h3_checkpoint", H3_CHECKPOINTS.get(backend))
@@ -370,7 +532,9 @@ def style_options(values):
     if (result.get("h3_overlap", 0) >= result.get("h3_window", 1)
             or result.get("window_overlap", 0) >= result.get("window_frames", 1)):
         raise ValueError("窗口重叠帧数必须小于窗口上限")
-    if result.get("union_variant") == "syfe":
+    if manifest:
+        result["custom_model"] = {"id": selection, **manifest}
+    if result.get("union_variant") == "syfe" and (not manifest or result["union_enabled"]):
         if syfe_union_path() is None:
             raise ValueError("本服务缺少 SyFe Union 权重")
     else:

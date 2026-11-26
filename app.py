@@ -15,7 +15,7 @@ from PIL import Image
 
 import engine as e
 from vr360_options import H3_CHECKPOINTS, H3_FIELDS, H3_INFO, H3_PROMPT, H3_NEGATIVE, LTX_ONLY
-from vr360_options import available_model_choices
+from vr360_options import CUSTOM_PREFIX, available_model_choices, custom_model, unsupported_custom_settings
 from vr360_options import BASE_FIELDS, CHOICES, CONTROLS, CONTROL_INFO, DEFAULT_PROMPT, GROUPS, SPEED_PRESETS
 from vr360_options import DEFAULT_VIEW_ZOOM, LTX_DEFAULTS, UNION_LABELS, VIEW_ZOOM_RANGE, syfe_union_path
 
@@ -511,7 +511,13 @@ def mode_label(spec):
         if spec.get("vr360"):
             opts = spec["vr360"]
             label += f" · 外围 {opts['generation_fps']} fps · 种子 {opts['seed']}"
-            if opts.get("outpaint_model") == "h3":
+            if manifest := opts.get("custom_model"):
+                label += f" · {manifest['label']}（自定义）"
+                if "h3_steps" in opts:
+                    label += f" · {opts['h3_size']}×{opts['h3_size']} · {opts['h3_steps']} 步"
+                elif "steps" in opts:
+                    label += f" · {opts['steps']} 步"
+            elif opts.get("outpaint_model") == "h3":
                 quant = "NVFP4 HQ" if opts.get("h3_checkpoint") == H3_CHECKPOINTS["h3_hq"] else "NVFP4"
                 label += f" · H3 FL2VA {quant} · {opts['h3_size']}×{opts['h3_size']} · {opts['h3_steps']} 步"
                 label += f" · H3 Union 2.0 ×{opts['h3_strength']:g}" if opts["h3_union"] else " · 无 Union"
@@ -770,6 +776,8 @@ def remember_field(name, value, previous):
 def reset_generation_settings(defaults, selection):
     if selection in ("ltx2", "ltx25"):
         defaults = {**defaults, **LTX_DEFAULTS, "outpaint_model": selection}
+    elif selection and selection.startswith(CUSTOM_PREFIX):
+        defaults = {**defaults, "outpaint_model": selection}
     remember(**defaults)
     return tuple(defaults.values())
 
@@ -886,6 +894,8 @@ def parameter_help(value, description):
 
 
 def generation_profile(level, selection):
+    if selection and selection.startswith(CUSTOM_PREFIX):
+        return selection, {}
     values = dict(SPEED_PRESETS[level])
     if selection in H3_CHECKPOINTS:
         selection = "h3_hq" if level == "质量" else "h3"
@@ -900,6 +910,8 @@ def generation_profile(level, selection):
 
 
 def profile_match(selection, settings):
+    if selection and selection.startswith(CUSTOM_PREFIX):
+        return None
     for level in ("快速", "质量"):
         model, target = generation_profile(level, selection)
         if model == selection and all(settings.get(key) == value for key, value in target.items()):
@@ -909,7 +921,10 @@ def profile_match(selection, settings):
 
 def profile_header(selection, settings, match):
     applied = f"{match}档" if match else "自定义参数"
-    if selection in H3_CHECKPOINTS:
+    if selection and selection.startswith(CUSTOM_PREFIX):
+        summary = "参数由该模型的 model.json 和当前可用控件决定"
+        applied = "自定义模型"
+    elif selection in H3_CHECKPOINTS:
         canvas = int(settings["h3_size"])
         union = "Union 开启" if settings["h3_union"] else "Union 关闭"
         summary = f"{canvas} × {canvas} · {settings['generation_fps']} fps · {int(settings['h3_steps'])} 步 · {union}"
@@ -929,6 +944,8 @@ def profile_header(selection, settings, match):
 
 def profile_description(level, selection, has_syfe):
     model, settings = generation_profile(level, selection)
+    if not settings:
+        return f"<h4>{level}档</h4><p>适用于内置模型</p>"
     fps = settings["generation_fps"]
     if model in H3_CHECKPOINTS:
         name = "NVFP4 HQ" if model == "h3_hq" else "NVFP4"
@@ -1049,7 +1066,7 @@ def build():
             )
             backend = gr.Dropdown(
                 available_model_choices(), value="h3_hq", label="外围生成模型", interactive=True, filterable=False,
-                info="默认值为 H3 FL2VA · NVFP4 HQ。LTX-2.3 和 LTX-2.5 共用采样、参考掩码和 Union 深度设置。启用外围扩画后生效。",
+                info="默认值为 H3 FL2VA · NVFP4 HQ。自定义模型从模型目录读取，选中后显示该工作流支持的设置。",
             )
             with gr.Column(elem_id="generation-profile") as preset_group:
                 initial_model, initial_profile = generation_profile("质量", "h3_hq")
@@ -1083,7 +1100,7 @@ def build():
             def add_group(title, names, family=None):
                 with gr.Accordion(title, open=False, visible=family != "ltx2") as group:
                     if family:
-                        model_groups.append((family, group))
+                        model_groups.append((family, tuple(names), group))
                     for name in names:
                         if name in base_controls:
                             base_controls[name].render()
@@ -1131,20 +1148,36 @@ def build():
                     raise gr.Error("本服务缺少 SyFe Union 权重")
                 return [selection, *(values.get(k, gr.skip()) for k in preset_keys)]
             def profile_state(selection, *values):
+                use_builtin_presets = not (selection and selection.startswith(CUSTOM_PREFIX))
                 current = dict(zip(preset_keys, values))
                 match = profile_match(selection, current)
                 return (
                     profile_header(selection, current, match),
                     profile_description("快速", selection, has_syfe),
                     profile_description("质量", selection, has_syfe),
-                    gr.update(variant="primary" if match == "快速" else "secondary"),
+                    gr.update(variant="primary" if match == "快速" else "secondary",
+                              interactive=use_builtin_presets),
                     gr.update(variant="primary" if match == "质量" else "secondary",
-                              interactive=selection in H3_CHECKPOINTS or has_syfe),
+                              interactive=use_builtin_presets and (selection in H3_CHECKPOINTS or has_syfe)),
                 )
+            model_controls = {**style_controls, **h3_controls}
+
             def model_visibility(selection):
+                hidden = set()
                 family = "h3" if selection in H3_CHECKPOINTS else "ltx2"
-                return [gr.update(visible=family == group_family) for group_family, _ in model_groups]
-            group_outputs = [g for _, g in model_groups]
+                if selection and selection.startswith(CUSTOM_PREFIX):
+                    try:
+                        manifest = custom_model(selection)
+                    except (OSError, ValueError) as exc:
+                        raise gr.Error(str(exc)) from exc
+                    family = "h3" if manifest["family"] == "h3" else "ltx2"
+                    hidden.update(unsupported_custom_settings(manifest), manifest["settings"], ("outpaint_checkpoint",))
+                return [
+                    *(gr.update(visible=family == group_family and any(name not in hidden for name in names))
+                      for group_family, names, _ in model_groups),
+                    *(gr.update(visible=name not in hidden) for name in model_controls),
+                ]
+            group_outputs = [*(group for _, _, group in model_groups), *model_controls.values()]
             backend.change(model_visibility, backend, group_outputs, api_name=False)
             state_inputs = [backend, *preset_controls]
             profile_outputs = [preset_note, quick_card, quality_card, quick, quality]

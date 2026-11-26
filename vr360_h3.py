@@ -95,7 +95,12 @@ class Fisheye:
 def graph(opts, window):
     nodes = json.loads((engine.ROOT / "h3_graph.json").read_bytes())
     checkpoint = opts.get("h3_checkpoint", H3_CHECKPOINTS["h3"])
-    if checkpoint not in H3_CHECKPOINTS.values():
+    if manifest := opts.get("custom_model"):
+        assets = manifest["assets"]
+        checkpoint = assets["checkpoint"]
+        nodes["6"]["inputs"]["vae_name"] = assets["video_vae"]
+        nodes["7"]["inputs"]["clip_name"] = assets["text_encoder"]
+    elif checkpoint not in H3_CHECKPOINTS.values():
         raise ValueError(f"不支持的 H3 FL2VA 权重 {checkpoint}")
     nodes["8"]["inputs"]["unet_name"] = checkpoint
     if os.environ.get("MMD_H3_PROFILE") == "1":

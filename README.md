@@ -41,5 +41,5 @@ docker compose ps
 
 - [当前版本测试与耗时](docs/benchmarks.md)
 - [历史实验档案 · 采用、放弃与未完成的方案](docs/experiment-history.md)
-- [模型目录和获取来源](docs/models.md)
+- [模型目录和获取来源](docs/models.md) · [导入自己的扩画模型](docs/models.md#导入自己的外围扩画模型)
 - [第三方来源及许可证](THIRD_PARTY_NOTICES.md)
