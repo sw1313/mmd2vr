@@ -39,6 +39,7 @@ docker compose ps
 
 ## 实测与依赖
 
-- [测试过程与耗时](docs/benchmarks.md)
+- [当前版本测试与耗时](docs/benchmarks.md)
+- [历史实验档案 · 采用、放弃与未完成的方案](docs/experiment-history.md)
 - [模型目录和获取来源](docs/models.md)
 - [第三方来源及许可证](THIRD_PARTY_NOTICES.md)
