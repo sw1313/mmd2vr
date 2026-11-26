@@ -22,6 +22,7 @@ __pycache__/
 *.jpg
 *.jpeg
 *.png
+!docs/figures/*.png
 *.gif
 *.webp
 *.sqlite3*

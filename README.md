@@ -2,6 +2,10 @@
 
 把普通 2D MMD 视频转成立体 VR180 或影院 Full SBS。网页负责选片、批量排队和查看进度，转制服务在本机运行。输出为左眼在左的 HEVC MP4。
 
+![四人舞台同一帧，左为原片，中右为官方 Union 和 SyFe 的左眼成片](docs/figures/syfe-view.png)
+
+[当前成片对照](docs/benchmarks.md) · [历史实验图与取舍](docs/experiment-history.md)
+
 ## 功能
 
 - 用 iw3 和视频深度估计合成双眼画面。VR180 支持 75°、100°、110° 基准视角，横向曲率与原片视角倍率可调。
