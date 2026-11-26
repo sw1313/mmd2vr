@@ -1,0 +1,85 @@
+{
+  "6": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+    }
+  },
+  "7": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "type": "minimax",
+      "device": "default"
+    }
+  },
+  "8": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "MiniMax-H3_FL2VA-NVFP4.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "9": {
+    "class_type": "MiniMaxLowVRAMAttention",
+    "inputs": {
+      "model": [
+        "8",
+        0
+      ],
+      "head_chunks": 8
+    }
+  },
+  "11": {
+    "class_type": "MiniMaxChunkFeedForward",
+    "inputs": {
+      "model": [
+        "9",
+        0
+      ],
+      "chunks": 8,
+      "seq_threshold": 4096
+    }
+  },
+  "12": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "7",
+        0
+      ],
+      "text": "Forward view. Continue the same animated scene and motion. High quality, detailed video. Match the original 3D animation, surface materials, texture detail, lighting direction, and soft shadows. Preserve each visible character's proportions and the continuity of their movements."
+    }
+  },
+  "13": {
+    "class_type": "H3SphereOutpaint",
+    "inputs": {
+      "model": [
+        "11",
+        0
+      ],
+      "vae": [
+        "6",
+        0
+      ],
+      "positive": [
+        "12",
+        0
+      ],
+      "negative": [
+        "14",
+        0
+      ]
+    }
+  },
+  "14": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "7",
+        0
+      ],
+      "text": "extra limbs, missing limbs, fused limbs, disconnected arms or legs, duplicated bodies, malformed hands, extra fingers, flickering textures, blurry details, smeared surface textures, flat painted backdrops"
+    }
+  }
+}

@@ -1,0 +1,8 @@
+FROM python:3.13-slim-bookworm
+ENV PYTHONUNBUFFERED=1 PYTHONUTF8=1 GRADIO_ANALYTICS_ENABLED=False HOME=/tmp
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir gradio==6.32.0 filelock numpy
+WORKDIR /app
+COPY engine.py app.py vr180.py vr360_options.py ./
+ENV MMD_INPUT=/input MMD_OUTPUT=/output MMD_STATE=/state NUNIF_HOME=/models MMD_HOST=0.0.0.0
+CMD ["python","app.py"]
